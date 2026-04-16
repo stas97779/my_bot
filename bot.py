@@ -15,17 +15,18 @@ dp = Dispatcher(storage=MemoryStorage())
 
 orders = []
 active_user = None
-custom_shops = []  # магазины добавленные пользователями
+custom_shops = []
 
 # --- Состояния ---
 class OrderState(StatesGroup):
     choosing_shop = State()
     entering_custom_shop = State()
     choosing_date = State()
-    entering_time = State()
+    entering_times = State()
     confirming = State()
 
 class EditState(StatesGroup):
+    choosing_slot = State()
     entering_new_time = State()
 
 # --- Вспомогательные функции ---
@@ -43,7 +44,6 @@ def shops_keyboard():
     builder = InlineKeyboardBuilder()
     for i, shop in enumerate(all_shops()):
         builder.button(text=shop, callback_data=f"shop_{i}")
-    # Кнопка добавить свой магазин
     builder.button(text="➕ Добавить свой магазин", callback_data="add_shop")
     builder.adjust(1)
     return builder.as_markup()
@@ -62,6 +62,18 @@ def confirm_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
+def parse_times(text):
+    """Парсит строку вида '10:00, 14:30, 18:00' в список времён"""
+    slots = []
+    parts = [p.strip() for p in text.split(",")]
+    for part in parts:
+        try:
+            datetime.strptime(part, "%H:%M")
+            slots.append(part)
+        except ValueError:
+            return None
+    return slots if slots else None
+
 def build_orders_text_and_keyboard():
     if not orders:
         return "📭 Предзаказов пока нет.", None
@@ -70,35 +82,36 @@ def build_orders_text_and_keyboard():
     builder = InlineKeyboardBuilder()
 
     for o in orders:
-        text += (
-            f"#{o['number']} | {o['date']} в {o['time']}\n"
-            f"🏪 {o['shop']}\n"
-        )
-        if o.get("comment"):
-            text += f"💬 {o['comment']}\n"
+        text += f"🏪 {o['shop']} | 📅 {o['date']}\n"
+        for i, slot in enumerate(o["slots"]):
+            text += f"  ⏰ {slot['time']}"
+            if slot.get("comment"):
+                text += f" — {slot['comment']}"
+            text += "\n"
         text += f"{'─' * 25}\n"
 
         builder.button(
-            text=f"🗑 Удалить #{o['number']}",
+            text=f"🗑 Удалить заказ #{o['number']}",
             callback_data=f"delete_{o['number']}"
         )
         builder.button(
-            text=f"✏️ Изменить #{o['number']}",
+            text=f"✏️ Изменить слот #{o['number']}",
             callback_data=f"edit_{o['number']}"
         )
 
     builder.adjust(1)
     return text, builder.as_markup()
 
-def parse_time_and_comment(text):
-    parts = text.strip().split(maxsplit=1)
-    time_str = parts[0]
-    comment = parts[1] if len(parts) > 1 else ""
-    try:
-        datetime.strptime(time_str, "%H:%M")
-        return time_str, comment
-    except ValueError:
-        return None, None
+def slots_keyboard(order_number, slots):
+    """Кнопки для выбора слота при редактировании"""
+    builder = InlineKeyboardBuilder()
+    for i, slot in enumerate(slots):
+        builder.button(
+            text=f"⏰ {slot['time']} {slot.get('comment', '')}",
+            callback_data=f"slot_{order_number}_{i}"
+        )
+    builder.adjust(1)
+    return builder.as_markup()
 
 # --- Хэндлеры ---
 @dp.message(CommandStart())
@@ -156,35 +169,36 @@ async def date_chosen(call: CallbackQuery, state: FSMContext):
     await state.update_data(date=date)
     await call.message.edit_text(
         f"✅ Дата: {date}\n\n"
-        f"Шаг 3️⃣ — введи время и комментарий одной строкой:\n\n"
-        f"Формат: ЧЧ:ММ комментарий\n"
-        f"Пример: 14:30 забирать от базы Вадима\n\n"
-        f"Или просто время:\n"
+        f"Шаг 3️⃣ — введи время через запятую:\n\n"
+        f"Пример: 10:00, 14:30, 18:00\n\n"
+        f"Или одно время:\n"
         f"Пример: 14:30"
     )
-    await state.set_state(OrderState.entering_time)
+    await state.set_state(OrderState.entering_times)
 
-@dp.message(OrderState.entering_time)
-async def time_entered(message: Message, state: FSMContext):
-    time_str, comment = parse_time_and_comment(message.text)
+@dp.message(OrderState.entering_times)
+async def times_entered(message: Message, state: FSMContext):
+    slots = parse_times(message.text)
 
-    if not time_str:
+    if not slots:
         await message.answer(
-            "⚠️ Неверный формат! Введи время в формате ЧЧ:ММ\n"
-            "Пример: 14:30 или 14:30 Без лука"
+            "⚠️ Неверный формат! Введи время через запятую в формате ЧЧ:ММ\n"
+            "Пример: 10:00, 14:30, 18:00"
         )
         return
 
-    await state.update_data(time=time_str, comment=comment)
+    # Создаём слоты
+    slot_list = [{"time": t, "comment": ""} for t in slots]
+    await state.update_data(slots=slot_list)
     data = await state.get_data()
-    comment_text = f"\n💬 Комментарий: {comment}" if comment else ""
+
+    slots_text = "\n".join([f"  ⏰ {s['time']}" for s in slot_list])
 
     await message.answer(
         f"📋 Проверь предзаказ:\n\n"
         f"🏪 Магазин: {data['shop']}\n"
         f"📅 Дата: {data['date']}\n"
-        f"🕐 Время: {time_str}"
-        f"{comment_text}\n\n"
+        f"Временные слоты:\n{slots_text}\n\n"
         f"Всё верно?",
         reply_markup=confirm_keyboard()
     )
@@ -200,18 +214,17 @@ async def order_confirmed(call: CallbackQuery, state: FSMContext):
         "number": order_number,
         "shop": data["shop"],
         "date": data["date"],
-        "time": data["time"],
-        "comment": data.get("comment", ""),
+        "slots": data["slots"],
     }
     orders.append(order)
 
-    comment_text = f"\n💬 {data.get('comment')}" if data.get("comment") else ""
+    slots_text = "\n".join([f"  ⏰ {s['time']}" for s in data["slots"]])
 
     await call.message.edit_text(
         f"🎉 Предзаказ №{order_number} оформлен!\n\n"
         f"🏪 {data['shop']}\n"
-        f"📅 {data['date']} в {data['time']}"
-        f"{comment_text}\n\n"
+        f"📅 {data['date']}\n"
+        f"Слоты:\n{slots_text}\n\n"
         f"Чтобы оформить новый — /start"
     )
 
@@ -247,6 +260,7 @@ async def delete_order(call: CallbackQuery):
     else:
         await call.message.edit_text(text)
 
+# --- Редактирование слота ---
 @dp.callback_query(F.data.startswith("edit_"))
 async def edit_order(call: CallbackQuery, state: FSMContext):
     order_number = int(call.data.split("_")[1])
@@ -258,19 +272,39 @@ async def edit_order(call: CallbackQuery, state: FSMContext):
 
     await state.update_data(edit_order_number=order_number)
     await call.message.answer(
-        f"✏️ Редактирование предзаказа #{order_number}\n\n"
-        f"Текущее время: {order['time']}\n"
-        f"Текущий комментарий: {order.get('comment') or 'нет'}\n\n"
+        f"✏️ Выбери слот для редактирования в заказе #{order_number}:",
+        reply_markup=slots_keyboard(order_number, order["slots"])
+    )
+    await state.set_state(EditState.choosing_slot)
+
+@dp.callback_query(EditState.choosing_slot, F.data.startswith("slot_"))
+async def slot_chosen(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split("_")
+    order_number = int(parts[1])
+    slot_index = int(parts[2])
+
+    order = next((o for o in orders if o["number"] == order_number), None)
+    slot = order["slots"][slot_index]
+
+    await state.update_data(edit_slot_index=slot_index)
+    await call.message.edit_text(
+        f"✏️ Редактирование слота ⏰ {slot['time']}\n\n"
         f"Введи новое время и комментарий:\n"
-        f"Пример: 16:00 Позвоните за час"
+        f"Пример: 16:00 Позвоните за час\n\n"
+        f"Или только время:\n"
+        f"Пример: 16:00"
     )
     await state.set_state(EditState.entering_new_time)
 
 @dp.message(EditState.entering_new_time)
-async def save_edited_order(message: Message, state: FSMContext):
-    time_str, comment = parse_time_and_comment(message.text)
+async def save_edited_slot(message: Message, state: FSMContext):
+    parts = message.text.strip().split(maxsplit=1)
+    time_str = parts[0]
+    comment = parts[1] if len(parts) > 1 else ""
 
-    if not time_str:
+    try:
+        datetime.strptime(time_str, "%H:%M")
+    except ValueError:
         await message.answer(
             "⚠️ Неверный формат! Введи время в формате ЧЧ:ММ\n"
             "Пример: 16:00 или 16:00 Позвоните за час"
@@ -279,6 +313,7 @@ async def save_edited_order(message: Message, state: FSMContext):
 
     data = await state.get_data()
     order_number = data["edit_order_number"]
+    slot_index = data["edit_slot_index"]
     order = next((o for o in orders if o["number"] == order_number), None)
 
     if not order:
@@ -286,14 +321,12 @@ async def save_edited_order(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    order["time"] = time_str
-    order["comment"] = comment
+    order["slots"][slot_index]["time"] = time_str
+    order["slots"][slot_index]["comment"] = comment
 
-    comment_text = f"\n💬 {comment}" if comment else ""
+    comment_text = f" — {comment}" if comment else ""
     await message.answer(
-        f"✅ Предзаказ #{order_number} обновлён!\n\n"
-        f"🕐 Новое время: {time_str}"
-        f"{comment_text}"
+        f"✅ Слот обновлён: ⏰ {time_str}{comment_text}"
     )
 
     text, keyboard = build_orders_text_and_keyboard()
