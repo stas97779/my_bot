@@ -20,9 +20,7 @@ active_user = None
 class OrderState(StatesGroup):
     choosing_shop = State()
     choosing_date = State()
-    choosing_hour = State()
-    choosing_minute_tens = State()
-    choosing_minute_units = State()
+    entering_time = State()
     confirming = State()
 
 # --- Вспомогательные функции ---
@@ -47,27 +45,6 @@ def dates_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
-def hours_keyboard():
-    builder = InlineKeyboardBuilder()
-    for hour in range(9, 22):
-        builder.button(text=f"{hour:02d}:__", callback_data=f"hour_{hour}")
-    builder.adjust(3)
-    return builder.as_markup()
-
-def minute_tens_keyboard():
-    builder = InlineKeyboardBuilder()
-    for tens in range(0, 6):
-        builder.button(text=f"{tens}_", callback_data=f"tens_{tens}")
-    builder.adjust(3)
-    return builder.as_markup()
-
-def minute_units_keyboard(tens):
-    builder = InlineKeyboardBuilder()
-    for unit in range(0, 10):
-        builder.button(text=f":{tens}{unit}", callback_data=f"unit_{unit}")
-    builder.adjust(5)
-    return builder.as_markup()
-
 def confirm_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Подтвердить", callback_data="confirm_yes")
@@ -86,8 +63,10 @@ def build_orders_text_and_keyboard():
         text += (
             f"#{o['number']} | {o['date']} в {o['time']}\n"
             f"🏪 {o['shop']}\n"
-            f"{'─' * 25}\n"
         )
+        if o.get("comment"):
+            text += f"💬 {o['comment']}\n"
+        text += f"{'─' * 25}\n"
         builder.button(
             text=f"🗑 Удалить #{o['number']}",
             callback_data=f"delete_{o['number']}"
@@ -95,6 +74,17 @@ def build_orders_text_and_keyboard():
 
     builder.adjust(1)
     return text, builder.as_markup()
+
+def parse_time_and_comment(text):
+    """Разбирает строку вида '14:30 комментарий' """
+    parts = text.strip().split(maxsplit=1)
+    time_str = parts[0]
+    comment = parts[1] if len(parts) > 1 else ""
+    try:
+        datetime.strptime(time_str, "%H:%M")
+        return time_str, comment
+    except ValueError:
+        return None, None
 
 # --- Хэндлеры ---
 @dp.message(CommandStart())
@@ -132,44 +122,37 @@ async def date_chosen(call: CallbackQuery, state: FSMContext):
     date = call.data.replace("date_", "")
     await state.update_data(date=date)
     await call.message.edit_text(
-        f"✅ Дата: {date}\n\nШаг 3️⃣ — выбери час:",
-        reply_markup=hours_keyboard()
+        f"✅ Дата: {date}\n\n"
+        f"Шаг 3️⃣ — введи время и комментарий одной строкой:\n\n"
+        f"Формат: ЧЧ:ММ комментарий\n"
+        f"Пример: 14:30 Без лука, позвоните заранее\n\n"
+        f"Или просто время без комментария:\n"
+        f"Пример: 14:30"
     )
-    await state.set_state(OrderState.choosing_hour)
+    await state.set_state(OrderState.entering_time)
 
-@dp.callback_query(OrderState.choosing_hour, F.data.startswith("hour_"))
-async def hour_chosen(call: CallbackQuery, state: FSMContext):
-    hour = int(call.data.split("_")[1])
-    await state.update_data(hour=hour)
-    await call.message.edit_text(
-        f"✅ Час: {hour:02d}:__\n\nШаг 4️⃣ — выбери десятки минут:",
-        reply_markup=minute_tens_keyboard()
-    )
-    await state.set_state(OrderState.choosing_minute_tens)
+@dp.message(OrderState.entering_time)
+async def time_entered(message: Message, state: FSMContext):
+    time_str, comment = parse_time_and_comment(message.text)
 
-@dp.callback_query(OrderState.choosing_minute_tens, F.data.startswith("tens_"))
-async def minute_tens_chosen(call: CallbackQuery, state: FSMContext):
-    tens = int(call.data.split("_")[1])
-    await state.update_data(tens=tens)
+    if not time_str:
+        await message.answer(
+            "⚠️ Неверный формат! Введи время в формате ЧЧ:ММ\n"
+            "Пример: 14:30 или 14:30 Без лука"
+        )
+        return
+
+    await state.update_data(time=time_str, comment=comment)
     data = await state.get_data()
-    await call.message.edit_text(
-        f"✅ Час: {data['hour']:02d}:{tens}_\n\nШаг 5️⃣ — выбери единицы минут:",
-        reply_markup=minute_units_keyboard(tens)
-    )
-    await state.set_state(OrderState.choosing_minute_units)
 
-@dp.callback_query(OrderState.choosing_minute_units, F.data.startswith("unit_"))
-async def minute_units_chosen(call: CallbackQuery, state: FSMContext):
-    unit = int(call.data.split("_")[1])
-    data = await state.get_data()
-    minute = data["tens"] * 10 + unit
-    time = f"{data['hour']:02d}:{minute:02d}"
-    await state.update_data(time=time)
-    await call.message.edit_text(
+    comment_text = f"\n💬 Комментарий: {comment}" if comment else ""
+
+    await message.answer(
         f"📋 Проверь предзаказ:\n\n"
         f"🏪 Магазин: {data['shop']}\n"
         f"📅 Дата: {data['date']}\n"
-        f"🕐 Время: {time}\n\n"
+        f"🕐 Время: {time_str}"
+        f"{comment_text}\n\n"
         f"Всё верно?",
         reply_markup=confirm_keyboard()
     )
@@ -186,13 +169,17 @@ async def order_confirmed(call: CallbackQuery, state: FSMContext):
         "shop": data["shop"],
         "date": data["date"],
         "time": data["time"],
+        "comment": data.get("comment", ""),
     }
     orders.append(order)
+
+    comment_text = f"\n💬 {data.get('comment')}" if data.get("comment") else ""
 
     await call.message.edit_text(
         f"🎉 Предзаказ №{order_number} оформлен!\n\n"
         f"🏪 {data['shop']}\n"
-        f"📅 {data['date']} в {data['time']}\n\n"
+        f"📅 {data['date']} в {data['time']}"
+        f"{comment_text}\n\n"
         f"Чтобы оформить новый — /start"
     )
 
