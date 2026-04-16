@@ -23,6 +23,9 @@ class OrderState(StatesGroup):
     entering_time = State()
     confirming = State()
 
+class EditState(StatesGroup):
+    entering_new_time = State()
+
 # --- Вспомогательные функции ---
 def get_next_days(n=7):
     days = []
@@ -67,16 +70,20 @@ def build_orders_text_and_keyboard():
         if o.get("comment"):
             text += f"💬 {o['comment']}\n"
         text += f"{'─' * 25}\n"
+
         builder.button(
             text=f"🗑 Удалить #{o['number']}",
             callback_data=f"delete_{o['number']}"
+        )
+        builder.button(
+            text=f"✏️ Изменить #{o['number']}",
+            callback_data=f"edit_{o['number']}"
         )
 
     builder.adjust(1)
     return text, builder.as_markup()
 
 def parse_time_and_comment(text):
-    """Разбирает строку вида '14:30 комментарий' """
     parts = text.strip().split(maxsplit=1)
     time_str = parts[0]
     comment = parts[1] if len(parts) > 1 else ""
@@ -126,7 +133,7 @@ async def date_chosen(call: CallbackQuery, state: FSMContext):
         f"Шаг 3️⃣ — введи время и комментарий одной строкой:\n\n"
         f"Формат: ЧЧ:ММ комментарий\n"
         f"Пример: 14:30 Без лука, позвоните заранее\n\n"
-        f"Или просто время без комментария:\n"
+        f"Или просто время:\n"
         f"Пример: 14:30"
     )
     await state.set_state(OrderState.entering_time)
@@ -144,7 +151,6 @@ async def time_entered(message: Message, state: FSMContext):
 
     await state.update_data(time=time_str, comment=comment)
     data = await state.get_data()
-
     comment_text = f"\n💬 Комментарий: {comment}" if comment else ""
 
     await message.answer(
@@ -214,6 +220,59 @@ async def delete_order(call: CallbackQuery):
         await call.message.edit_text(text, reply_markup=keyboard)
     else:
         await call.message.edit_text(text)
+
+@dp.callback_query(F.data.startswith("edit_"))
+async def edit_order(call: CallbackQuery, state: FSMContext):
+    order_number = int(call.data.split("_")[1])
+    order = next((o for o in orders if o["number"] == order_number), None)
+
+    if not order:
+        await call.answer("⚠️ Заказ не найден.", show_alert=True)
+        return
+
+    await state.update_data(edit_order_number=order_number)
+    await call.message.answer(
+        f"✏️ Редактирование предзаказа #{order_number}\n\n"
+        f"Текущее время: {order['time']}\n"
+        f"Текущий комментарий: {order.get('comment') or 'нет'}\n\n"
+        f"Введи новое время и комментарий:\n"
+        f"Пример: 16:00 Позвоните за час"
+    )
+    await state.set_state(EditState.entering_new_time)
+
+@dp.message(EditState.entering_new_time)
+async def save_edited_order(message: Message, state: FSMContext):
+    time_str, comment = parse_time_and_comment(message.text)
+
+    if not time_str:
+        await message.answer(
+            "⚠️ Неверный формат! Введи время в формате ЧЧ:ММ\n"
+            "Пример: 16:00 или 16:00 Позвоните за час"
+        )
+        return
+
+    data = await state.get_data()
+    order_number = data["edit_order_number"]
+    order = next((o for o in orders if o["number"] == order_number), None)
+
+    if not order:
+        await message.answer("⚠️ Заказ не найден.")
+        await state.clear()
+        return
+
+    order["time"] = time_str
+    order["comment"] = comment
+
+    comment_text = f"\n💬 {comment}" if comment else ""
+    await message.answer(
+        f"✅ Предзаказ #{order_number} обновлён!\n\n"
+        f"🕐 Новое время: {time_str}"
+        f"{comment_text}"
+    )
+
+    text, keyboard = build_orders_text_and_keyboard()
+    await message.answer(text, reply_markup=keyboard)
+    await state.clear()
 
 @dp.message(Command("send"))
 async def send_orders(message: Message):
