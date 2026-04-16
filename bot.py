@@ -228,8 +228,8 @@ async def delete_order(call: CallbackQuery):
         await call.message.edit_text(text, reply_markup=keyboard)
     else:
         await call.message.edit_text(text)
-
-  @dp.message(Command("getid"))
+        
+        @dp.message(Command("getid"))
 async def get_id(message: Message):
     await message.answer(f"ID этого чата: `{message.chat.id}`")
 
