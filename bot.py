@@ -434,7 +434,11 @@ async def send_orders(message: Message):
         await message.answer("⛔ У вас нет прав для этой команды.")
         return
 
-    await bot.send_message(TARGET_GROUP_ID, build_orders_text())
+    await bot.send_message(
+        TARGET_GROUP_ID,
+        build_orders_text(),
+        reply_markup=manage_button_keyboard()
+    )
     await message.answer("✅ Список предзаказов отправлен в группу!")
 
 # --- Запуск ---
