@@ -15,10 +15,12 @@ dp = Dispatcher(storage=MemoryStorage())
 
 orders = []
 active_user = None
+custom_shops = []  # магазины добавленные пользователями
 
 # --- Состояния ---
 class OrderState(StatesGroup):
     choosing_shop = State()
+    entering_custom_shop = State()
     choosing_date = State()
     entering_time = State()
     confirming = State()
@@ -34,10 +36,15 @@ def get_next_days(n=7):
         days.append(date.strftime("%d.%m.%Y"))
     return days
 
+def all_shops():
+    return SHOPS + custom_shops
+
 def shops_keyboard():
     builder = InlineKeyboardBuilder()
-    for i, shop in enumerate(SHOPS):
+    for i, shop in enumerate(all_shops()):
         builder.button(text=shop, callback_data=f"shop_{i}")
+    # Кнопка добавить свой магазин
+    builder.button(text="➕ Добавить свой магазин", callback_data="add_shop")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -113,10 +120,29 @@ async def cmd_start(message: Message, state: FSMContext):
     )
     await state.set_state(OrderState.choosing_shop)
 
+@dp.callback_query(OrderState.choosing_shop, F.data == "add_shop")
+async def add_shop(call: CallbackQuery, state: FSMContext):
+    await call.message.edit_text(
+        "➕ Введи название своего магазина:\n"
+        "Пример: Магазин на Садовой, 15"
+    )
+    await state.set_state(OrderState.entering_custom_shop)
+
+@dp.message(OrderState.entering_custom_shop)
+async def custom_shop_entered(message: Message, state: FSMContext):
+    shop_name = message.text.strip()
+    custom_shops.append(f"🏪 {shop_name}")
+    await state.update_data(shop=f"🏪 {shop_name}")
+    await message.answer(
+        f"✅ Магазин добавлен: 🏪 {shop_name}\n\nШаг 2️⃣ — выбери дату:",
+        reply_markup=dates_keyboard()
+    )
+    await state.set_state(OrderState.choosing_date)
+
 @dp.callback_query(OrderState.choosing_shop, F.data.startswith("shop_"))
 async def shop_chosen(call: CallbackQuery, state: FSMContext):
     index = int(call.data.split("_")[1])
-    shop = SHOPS[index]
+    shop = all_shops()[index]
     await state.update_data(shop=shop)
     await call.message.edit_text(
         f"✅ Магазин: {shop}\n\nШаг 2️⃣ — выбери дату:",
@@ -132,7 +158,7 @@ async def date_chosen(call: CallbackQuery, state: FSMContext):
         f"✅ Дата: {date}\n\n"
         f"Шаг 3️⃣ — введи время и комментарий одной строкой:\n\n"
         f"Формат: ЧЧ:ММ комментарий\n"
-        f"Пример: 14:30 Без лука, позвоните заранее\n\n"
+        f"Пример: 14:30 забирать от базы Вадима\n\n"
         f"Или просто время:\n"
         f"Пример: 14:30"
     )
