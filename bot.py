@@ -63,13 +63,16 @@ def confirm_keyboard():
     return builder.as_markup()
 
 def parse_times(text):
-    """Парсит строку вида '10:00, 14:30, 18:00' в список времён"""
+    """Парсит строку вида '10:00 Без лука, 14:30 Позвоните, 18:00'"""
     slots = []
     parts = [p.strip() for p in text.split(",")]
     for part in parts:
+        sub = part.strip().split(maxsplit=1)
+        time_str = sub[0]
+        comment = sub[1] if len(sub) > 1 else ""
         try:
-            datetime.strptime(part, "%H:%M")
-            slots.append(part)
+            datetime.strptime(time_str, "%H:%M")
+            slots.append({"time": time_str, "comment": comment})
         except ValueError:
             return None
     return slots if slots else None
@@ -83,7 +86,7 @@ def build_orders_text_and_keyboard():
 
     for o in orders:
         text += f"🏪 {o['shop']} | 📅 {o['date']}\n"
-        for i, slot in enumerate(o["slots"]):
+        for slot in o["slots"]:
             text += f"  ⏰ {slot['time']}"
             if slot.get("comment"):
                 text += f" — {slot['comment']}"
@@ -103,13 +106,12 @@ def build_orders_text_and_keyboard():
     return text, builder.as_markup()
 
 def slots_keyboard(order_number, slots):
-    """Кнопки для выбора слота при редактировании"""
     builder = InlineKeyboardBuilder()
     for i, slot in enumerate(slots):
-        builder.button(
-            text=f"⏰ {slot['time']} {slot.get('comment', '')}",
-            callback_data=f"slot_{order_number}_{i}"
-        )
+        label = f"⏰ {slot['time']}"
+        if slot.get("comment"):
+            label += f" — {slot['comment']}"
+        builder.button(text=label, callback_data=f"slot_{order_number}_{i}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -169,10 +171,11 @@ async def date_chosen(call: CallbackQuery, state: FSMContext):
     await state.update_data(date=date)
     await call.message.edit_text(
         f"✅ Дата: {date}\n\n"
-        f"Шаг 3️⃣ — введи время через запятую:\n\n"
-        f"Пример: 10:00, 14:30, 18:00\n\n"
-        f"Или одно время:\n"
-        f"Пример: 14:30"
+        f"Шаг 3️⃣ — введи время и комментарий через запятую:\n\n"
+        f"Формат: ЧЧ:ММ комментарий, ЧЧ:ММ комментарий\n"
+        f"Пример: 10:00 Без лука, 14:30 Позвоните, 18:00\n\n"
+        f"Или просто времена:\n"
+        f"Пример: 10:00, 14:30, 18:00"
     )
     await state.set_state(OrderState.entering_times)
 
@@ -183,22 +186,23 @@ async def times_entered(message: Message, state: FSMContext):
     if not slots:
         await message.answer(
             "⚠️ Неверный формат! Введи время через запятую в формате ЧЧ:ММ\n"
-            "Пример: 10:00, 14:30, 18:00"
+            "Пример: 10:00 Без лука, 14:30 Позвоните, 18:00"
         )
         return
 
-    # Создаём слоты
-    slot_list = [{"time": t, "comment": ""} for t in slots]
-    await state.update_data(slots=slot_list)
+    await state.update_data(slots=slots)
     data = await state.get_data()
 
-    slots_text = "\n".join([f"  ⏰ {s['time']}" for s in slot_list])
+    slots_text = "\n".join([
+        f"  ⏰ {s['time']}" + (f" — {s['comment']}" if s.get("comment") else "")
+        for s in slots
+    ])
 
     await message.answer(
         f"📋 Проверь предзаказ:\n\n"
         f"🏪 Магазин: {data['shop']}\n"
         f"📅 Дата: {data['date']}\n"
-        f"Временные слоты:\n{slots_text}\n\n"
+        f"Слоты:\n{slots_text}\n\n"
         f"Всё верно?",
         reply_markup=confirm_keyboard()
     )
@@ -218,7 +222,10 @@ async def order_confirmed(call: CallbackQuery, state: FSMContext):
     }
     orders.append(order)
 
-    slots_text = "\n".join([f"  ⏰ {s['time']}" for s in data["slots"]])
+    slots_text = "\n".join([
+        f"  ⏰ {s['time']}" + (f" — {s['comment']}" if s.get("comment") else "")
+        for s in data["slots"]
+    ])
 
     await call.message.edit_text(
         f"🎉 Предзаказ №{order_number} оформлен!\n\n"
@@ -260,7 +267,6 @@ async def delete_order(call: CallbackQuery):
     else:
         await call.message.edit_text(text)
 
-# --- Редактирование слота ---
 @dp.callback_query(F.data.startswith("edit_"))
 async def edit_order(call: CallbackQuery, state: FSMContext):
     order_number = int(call.data.split("_")[1])
@@ -288,7 +294,8 @@ async def slot_chosen(call: CallbackQuery, state: FSMContext):
 
     await state.update_data(edit_slot_index=slot_index)
     await call.message.edit_text(
-        f"✏️ Редактирование слота ⏰ {slot['time']}\n\n"
+        f"✏️ Редактирование слота ⏰ {slot['time']}\n"
+        f"Комментарий: {slot.get('comment') or 'нет'}\n\n"
         f"Введи новое время и комментарий:\n"
         f"Пример: 16:00 Позвоните за час\n\n"
         f"Или только время:\n"
@@ -349,3 +356,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
