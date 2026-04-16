@@ -14,6 +14,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 orders = []
+active_user = None  # кто сейчас оформляет заказ
 
 # --- Состояния ---
 class OrderState(StatesGroup):
@@ -98,6 +99,16 @@ def build_orders_text_and_keyboard():
 # --- Хэндлеры ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    global active_user
+
+    if active_user is not None and active_user != message.from_user.id:
+        await message.answer(
+            "⏳ Подожди — сейчас другой пользователь оформляет предзаказ.\n"
+            "Попробуй через минуту!"
+        )
+        return
+
+    active_user = message.from_user.id
     await state.clear()
     await message.answer(
         "👋 Привет! Я помогу оформить предзаказ.\n\nШаг 1️⃣ — выбери магазин:",
@@ -166,6 +177,7 @@ async def minute_units_chosen(call: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(OrderState.confirming, F.data == "confirm_yes")
 async def order_confirmed(call: CallbackQuery, state: FSMContext):
+    global active_user
     data = await state.get_data()
 
     order_number = len(orders) + 1
@@ -186,16 +198,19 @@ async def order_confirmed(call: CallbackQuery, state: FSMContext):
 
     text, keyboard = build_orders_text_and_keyboard()
     await call.message.answer(text, reply_markup=keyboard)
+
+    active_user = None
     await state.clear()
 
 @dp.callback_query(OrderState.confirming, F.data == "confirm_no")
 async def order_cancelled(call: CallbackQuery, state: FSMContext):
+    global active_user
+    active_user = None
     await state.clear()
     await call.message.edit_text(
         "❌ Заказ отменён. Чтобы начать заново — /start"
     )
 
-# --- Удаление заказа ---
 @dp.callback_query(F.data.startswith("delete_"))
 async def delete_order(call: CallbackQuery):
     order_number = int(call.data.split("_")[1])
