@@ -25,7 +25,9 @@ class OrderState(StatesGroup):
     entering_times = State()
     confirming = State()
 
-class EditState(StatesGroup):
+class ManageState(StatesGroup):
+    choosing_order = State()
+    choosing_action = State()
     choosing_slot = State()
     entering_new_time = State()
 
@@ -62,8 +64,42 @@ def confirm_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
+def manage_button_keyboard():
+    """Одна кнопка Управление под списком"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⚙️ Управление", callback_data="open_manage")
+    return builder.as_markup()
+
+def orders_manage_keyboard():
+    builder = InlineKeyboardBuilder()
+    for o in orders:
+        builder.button(
+            text=f"#{o['number']} {o['shop']} | {o['date']}",
+            callback_data=f"manage_{o['number']}"
+        )
+    builder.adjust(1)
+    return builder.as_markup()
+
+def action_keyboard(order_number):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Изменить слот", callback_data=f"action_edit_{order_number}")
+    builder.button(text="🗑 Удалить заказ", callback_data=f"action_delete_{order_number}")
+    builder.button(text="◀️ Назад", callback_data="action_back")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def slots_keyboard(order_number, slots):
+    builder = InlineKeyboardBuilder()
+    for i, slot in enumerate(slots):
+        label = f"⏰ {slot['time']}"
+        if slot.get("comment"):
+            label += f" — {slot['comment']}"
+        builder.button(text=label, callback_data=f"slot_{order_number}_{i}")
+    builder.button(text="◀️ Назад", callback_data=f"manage_{order_number}")
+    builder.adjust(1)
+    return builder.as_markup()
+
 def parse_times(text):
-    """Парсит строку вида '10:00 Без лука, 14:30 Позвоните, 18:00'"""
     slots = []
     parts = [p.strip() for p in text.split(",")]
     for part in parts:
@@ -77,45 +113,21 @@ def parse_times(text):
             return None
     return slots if slots else None
 
-def build_orders_text_and_keyboard():
+def build_orders_text():
     if not orders:
-        return "📭 Предзаказов пока нет.", None
-
+        return "📭 Предзаказов пока нет."
     text = "📋 Все предзаказы:\n\n"
-    builder = InlineKeyboardBuilder()
-
     for o in orders:
-        text += f"🏪 {o['shop']} | 📅 {o['date']}\n"
+        text += f"#{o['number']} | 🏪 {o['shop']} | 📅 {o['date']}\n"
         for slot in o["slots"]:
             text += f"  ⏰ {slot['time']}"
             if slot.get("comment"):
                 text += f" — {slot['comment']}"
             text += "\n"
         text += f"{'─' * 25}\n"
+    return text
 
-        builder.button(
-            text=f"🗑 Удалить заказ #{o['number']}",
-            callback_data=f"delete_{o['number']}"
-        )
-        builder.button(
-            text=f"✏️ Изменить слот #{o['number']}",
-            callback_data=f"edit_{o['number']}"
-        )
-
-    builder.adjust(1)
-    return text, builder.as_markup()
-
-def slots_keyboard(order_number, slots):
-    builder = InlineKeyboardBuilder()
-    for i, slot in enumerate(slots):
-        label = f"⏰ {slot['time']}"
-        if slot.get("comment"):
-            label += f" — {slot['comment']}"
-        builder.button(text=label, callback_data=f"slot_{order_number}_{i}")
-    builder.adjust(1)
-    return builder.as_markup()
-
-# --- Хэндлеры ---
+# --- Хэндлеры оформления ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     global active_user
@@ -235,8 +247,11 @@ async def order_confirmed(call: CallbackQuery, state: FSMContext):
         f"Чтобы оформить новый — /start"
     )
 
-    text, keyboard = build_orders_text_and_keyboard()
-    await call.message.answer(text, reply_markup=keyboard)
+    # Показываем список с кнопкой Управление
+    await call.message.answer(
+        build_orders_text(),
+        reply_markup=manage_button_keyboard()
+    )
     active_user = None
     await state.clear()
 
@@ -249,9 +264,56 @@ async def order_cancelled(call: CallbackQuery, state: FSMContext):
         "❌ Заказ отменён. Чтобы начать заново — /start"
     )
 
-@dp.callback_query(F.data.startswith("delete_"))
-async def delete_order(call: CallbackQuery):
+# --- Управление через кнопку ---
+@dp.callback_query(F.data == "open_manage")
+async def open_manage(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    if not orders:
+        await call.answer("📭 Предзаказов пока нет.", show_alert=True)
+        return
+
+    await call.message.edit_text(
+        "Выбери заказ для управления:",
+        reply_markup=orders_manage_keyboard()
+    )
+    await state.set_state(ManageState.choosing_order)
+
+@dp.callback_query(ManageState.choosing_order, F.data.startswith("manage_"))
+async def manage_order(call: CallbackQuery, state: FSMContext):
     order_number = int(call.data.split("_")[1])
+    order = next((o for o in orders if o["number"] == order_number), None)
+
+    if not order:
+        await call.answer("⚠️ Заказ не найден.", show_alert=True)
+        return
+
+    slots_text = "\n".join([
+        f"  ⏰ {s['time']}" + (f" — {s['comment']}" if s.get("comment") else "")
+        for s in order["slots"]
+    ])
+
+    await state.update_data(manage_order_number=order_number)
+    await call.message.edit_text(
+        f"📋 Заказ #{order_number}\n"
+        f"🏪 {order['shop']}\n"
+        f"📅 {order['date']}\n"
+        f"Слоты:\n{slots_text}\n\n"
+        f"Что хочешь сделать?",
+        reply_markup=action_keyboard(order_number)
+    )
+    await state.set_state(ManageState.choosing_action)
+
+@dp.callback_query(ManageState.choosing_action, F.data == "action_back")
+async def action_back(call: CallbackQuery, state: FSMContext):
+    await call.message.edit_text(
+        "Выбери заказ для управления:",
+        reply_markup=orders_manage_keyboard()
+    )
+    await state.set_state(ManageState.choosing_order)
+
+@dp.callback_query(ManageState.choosing_action, F.data.startswith("action_delete_"))
+async def action_delete(call: CallbackQuery, state: FSMContext):
+    order_number = int(call.data.split("_")[2])
     order = next((o for o in orders if o["number"] == order_number), None)
 
     if not order:
@@ -259,31 +321,55 @@ async def delete_order(call: CallbackQuery):
         return
 
     orders.remove(order)
-    await call.answer(f"✅ Предзаказ #{order_number} удалён.", show_alert=True)
+    await call.answer(f"✅ Заказ #{order_number} удалён.", show_alert=True)
+    await state.clear()
 
-    text, keyboard = build_orders_text_and_keyboard()
-    if keyboard:
-        await call.message.edit_text(text, reply_markup=keyboard)
-    else:
-        await call.message.edit_text(text)
+    if not orders:
+        await call.message.edit_text("📭 Предзаказов пока нет.")
+        return
 
-@dp.callback_query(F.data.startswith("edit_"))
-async def edit_order(call: CallbackQuery, state: FSMContext):
-    order_number = int(call.data.split("_")[1])
+    await call.message.edit_text(
+        build_orders_text(),
+        reply_markup=manage_button_keyboard()
+    )
+
+@dp.callback_query(ManageState.choosing_action, F.data.startswith("action_edit_"))
+async def action_edit(call: CallbackQuery, state: FSMContext):
+    order_number = int(call.data.split("_")[2])
     order = next((o for o in orders if o["number"] == order_number), None)
 
     if not order:
         await call.answer("⚠️ Заказ не найден.", show_alert=True)
         return
 
-    await state.update_data(edit_order_number=order_number)
-    await call.message.answer(
-        f"✏️ Выбери слот для редактирования в заказе #{order_number}:",
+    await call.message.edit_text(
+        f"✏️ Выбери слот для редактирования:",
         reply_markup=slots_keyboard(order_number, order["slots"])
     )
-    await state.set_state(EditState.choosing_slot)
+    await state.set_state(ManageState.choosing_slot)
 
-@dp.callback_query(EditState.choosing_slot, F.data.startswith("slot_"))
+@dp.callback_query(ManageState.choosing_slot, F.data.startswith("manage_"))
+async def back_to_manage(call: CallbackQuery, state: FSMContext):
+    order_number = int(call.data.split("_")[1])
+    order = next((o for o in orders if o["number"] == order_number), None)
+
+    slots_text = "\n".join([
+        f"  ⏰ {s['time']}" + (f" — {s['comment']}" if s.get("comment") else "")
+        for s in order["slots"]
+    ])
+
+    await state.update_data(manage_order_number=order_number)
+    await call.message.edit_text(
+        f"📋 Заказ #{order_number}\n"
+        f"🏪 {order['shop']}\n"
+        f"📅 {order['date']}\n"
+        f"Слоты:\n{slots_text}\n\n"
+        f"Что хочешь сделать?",
+        reply_markup=action_keyboard(order_number)
+    )
+    await state.set_state(ManageState.choosing_action)
+
+@dp.callback_query(ManageState.choosing_slot, F.data.startswith("slot_"))
 async def slot_chosen(call: CallbackQuery, state: FSMContext):
     parts = call.data.split("_")
     order_number = int(parts[1])
@@ -292,7 +378,7 @@ async def slot_chosen(call: CallbackQuery, state: FSMContext):
     order = next((o for o in orders if o["number"] == order_number), None)
     slot = order["slots"][slot_index]
 
-    await state.update_data(edit_slot_index=slot_index)
+    await state.update_data(edit_order_number=order_number, edit_slot_index=slot_index)
     await call.message.edit_text(
         f"✏️ Редактирование слота ⏰ {slot['time']}\n"
         f"Комментарий: {slot.get('comment') or 'нет'}\n\n"
@@ -301,9 +387,9 @@ async def slot_chosen(call: CallbackQuery, state: FSMContext):
         f"Или только время:\n"
         f"Пример: 16:00"
     )
-    await state.set_state(EditState.entering_new_time)
+    await state.set_state(ManageState.entering_new_time)
 
-@dp.message(EditState.entering_new_time)
+@dp.message(ManageState.entering_new_time)
 async def save_edited_slot(message: Message, state: FSMContext):
     parts = message.text.strip().split(maxsplit=1)
     time_str = parts[0]
@@ -336,8 +422,10 @@ async def save_edited_slot(message: Message, state: FSMContext):
         f"✅ Слот обновлён: ⏰ {time_str}{comment_text}"
     )
 
-    text, keyboard = build_orders_text_and_keyboard()
-    await message.answer(text, reply_markup=keyboard)
+    await message.answer(
+        build_orders_text(),
+        reply_markup=manage_button_keyboard()
+    )
     await state.clear()
 
 @dp.message(Command("send"))
@@ -346,8 +434,7 @@ async def send_orders(message: Message):
         await message.answer("⛔ У вас нет прав для этой команды.")
         return
 
-    text, keyboard = build_orders_text_and_keyboard()
-    await bot.send_message(TARGET_GROUP_ID, text, reply_markup=keyboard)
+    await bot.send_message(TARGET_GROUP_ID, build_orders_text())
     await message.answer("✅ Список предзаказов отправлен в группу!")
 
 # --- Запуск ---
@@ -356,4 +443,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
