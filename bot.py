@@ -2,19 +2,19 @@
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import BOT_TOKEN, SHOPS
+from config import BOT_TOKEN, SHOPS, ADMIN_ID, TARGET_GROUP_ID
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 orders = []
-active_user = None  # кто сейчас оформляет заказ
+active_user = None
 
 # --- Состояния ---
 class OrderState(StatesGroup):
@@ -198,7 +198,6 @@ async def order_confirmed(call: CallbackQuery, state: FSMContext):
 
     text, keyboard = build_orders_text_and_keyboard()
     await call.message.answer(text, reply_markup=keyboard)
-
     active_user = None
     await state.clear()
 
@@ -228,10 +227,16 @@ async def delete_order(call: CallbackQuery):
         await call.message.edit_text(text, reply_markup=keyboard)
     else:
         await call.message.edit_text(text)
-        
-        @dp.message(Command("getid"))
-async def get_id(message: Message):
-    await message.answer(f"ID этого чата: `{message.chat.id}`")
+
+@dp.message(Command("send"))
+async def send_orders(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для этой команды.")
+        return
+
+    text, keyboard = build_orders_text_and_keyboard()
+    await bot.send_message(TARGET_GROUP_ID, text, reply_markup=keyboard)
+    await message.answer("✅ Список предзаказов отправлен в группу!")
 
 # --- Запуск ---
 async def main():
