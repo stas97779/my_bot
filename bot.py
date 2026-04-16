@@ -229,6 +229,10 @@ async def delete_order(call: CallbackQuery):
     else:
         await call.message.edit_text(text)
 
+  @dp.message(Command("getid"))
+async def get_id(message: Message):
+    await message.answer(f"ID этого чата: `{message.chat.id}`")
+
 # --- Запуск ---
 async def main():
     await dp.start_polling(bot)
